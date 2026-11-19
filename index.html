@@ -51,11 +51,7 @@
 <script>(function(){ try{ var t = localStorage.getItem('coachops_theme') || 'light'; document.documentElement.setAttribute('data-theme', t); }catch(e){} })();</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -796,9 +792,14 @@ async function loadAll(){
   if(state.settings.monthlyReportWebAppUrl===undefined) state.settings.monthlyReportWebAppUrl = '';
   if(!state.packageTemplates) state.packageTemplates = [];
   state.loaded = true;
-  if(fbReady && fbUser){ setTimeout(()=>{ migrateSignaturesIfNeeded(); }, 1500); setTimeout(()=>{ syncAllPhoneLookups(); }, 4000); }
+  if(fbReady && fbUser){ setTimeout(()=>{ migrateSignaturesIfNeeded(); }, 1500); setTimeout(()=>{ syncAllPhoneLookups(); }, 4000); setTimeout(()=>{ ensureQrScanner(); }, 6000); }
 }
-async function saveStudents(){ await persistSet('students', state.students); }
+async function saveStudents(){
+  const touched = prepareLookupFieldsBeforeSave();
+  const p = persistSet('students', state.students);   // 這一行就已經把資料交給雲端了
+  touched.forEach(st=>{ syncStudentPhoneLookup(st); });
+  return p;
+}
 async function saveCoaches(){ await persistSet('coaches', state.coaches); }
 async function savePurchases(){ await persistSet('purchases', state.purchases); }
 /* ---------- 簽名圖獨立儲存（避免「簽到紀錄」單一文件超過 1MB 上限） ---------- */
@@ -952,7 +953,16 @@ function startInlineQRScan(inputId){
   const statusEl = document.getElementById('inline-qr-status');
   if(!area || !video) return;
   area.style.display = 'block';
-  if(typeof QrScanner === 'undefined'){ if(statusEl) statusEl.textContent = '掃描元件載入失敗，請檢查網路連線'; return; }
+  if(typeof QrScanner === 'undefined'){
+    if(statusEl) statusEl.textContent = '正在載入掃描元件…';
+    ensureQrScanner().then(ok=>{
+      const a = document.getElementById('qrcode-scan-area');
+      if(!a || a.style.display==='none' || inlineQRScanner) return;   // 已經取消掃描
+      if(ok) startInlineQRScan(inputId);
+      else { const el = document.getElementById('inline-qr-status'); if(el) el.textContent = '掃描元件載入失敗，請檢查網路連線'; }
+    });
+    return;
+  }
   QrScanner.WORKER_PATH = 'https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner-worker.min.js';
   inlineQRScanner = new QrScanner(video, result => {
     const text = typeof result === 'string' ? result : result.data;
@@ -1453,7 +1463,15 @@ function drawDashboardChart(){
     const prevBtn = document.getElementById('btn-day-prev'); if(prevBtn) prevBtn.disabled = dashDayPage<=0;
     const nextBtn = document.getElementById('btn-day-next'); if(nextBtn) nextBtn.disabled = dashDayPage>=totalPages-1;
     if(dashChartInstance){ try{ dashChartInstance.destroy(); }catch(e){} dashChartInstance = null; }
-    if(typeof Chart === 'undefined'){ canvas.insertAdjacentHTML('afterend','<div class="hint" style="text-align:center;">圖表元件載入失敗，請重新整理（不影響其他功能）</div>'); canvas.remove(); renderRevenueTreemap(); return; }
+    if(typeof Chart === 'undefined'){
+      ensureChart().then(ok=>{
+        const cv = document.getElementById('dash-chart');
+        if(!cv) return;   // 已經離開儀表板
+        if(ok){ drawDashboardChart(); return; }
+        if(!cv.dataset.failShown){ cv.dataset.failShown = '1'; cv.insertAdjacentHTML('afterend','<div class="hint" style="text-align:center;">圖表元件載入失敗，請重新整理（不影響其他功能）</div>'); }
+      });
+      return;
+    }
     dashChartInstance = new Chart(canvas, { type:'bar', data:{ labels, datasets:[{ data: counts, backgroundColor:'#E19E15', borderRadius:6, maxBarThickness:60 }] }, options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, ticks:{precision:0}}, x:{grid:{display:false}} } } });
   }
   renderRevenueTreemap();
@@ -1852,7 +1870,15 @@ function openQRScanModal(){
 function startQRScanner(){
   const video = document.getElementById('qr-video');
   const statusEl = document.getElementById('qr-scan-status');
-  if(typeof QrScanner === 'undefined'){ if(statusEl) statusEl.textContent = '掃描元件載入失敗，請改用手寫簽到'; return; }
+  if(typeof QrScanner === 'undefined'){
+    if(statusEl) statusEl.textContent = '正在載入掃描元件…';
+    ensureQrScanner().then(ok=>{
+      if(!document.getElementById('qr-video') || qrScannerInstance) return;   // 視窗已經關掉，或已經開始掃了
+      if(ok) startQRScanner();
+      else { const el = document.getElementById('qr-scan-status'); if(el) el.textContent = '掃描元件載入失敗，請改用手寫簽到'; }
+    });
+    return;
+  }
   QrScanner.WORKER_PATH = 'https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner-worker.min.js';
   qrScannerInstance = new QrScanner(video, result => {
     const text = typeof result === 'string' ? result : result.data;
@@ -1963,7 +1989,7 @@ function renderCheckinHistory(){
 }
 async function exportCheckinsExcelWithSignatures(){
   const start = document.getElementById('checkin-hist-start').value; const end = document.getElementById('checkin-hist-end').value;
-  if(typeof ExcelJS === 'undefined'){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
+  if(!(await ensureExcelJS())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const rows = state.checkins.filter(c=>{ const d=localDateStr(c.timestamp); return d>=start && d<=end; }).sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
   if(rows.length===0){ toast('此區間沒有簽到紀錄可匯出'); return; }
   toast('產生中，請稍候...');
@@ -3119,8 +3145,8 @@ function sheetFromRows(rows){
   ws['!cols'] = keys.map(k=>({ wch: Math.min(50, Math.max(6, w(k), ...rows.map(r=>w(r[k])))) + 2 }));
   return ws;
 }
-function exportReport1(){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportReport1(){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const rows = state.purchases.slice().sort((a,b)=>a.purchaseDate.localeCompare(b.purchaseDate)).map(p=>{
     const s = findStudent(p.studentId);
     return { '學生姓名': s?s.name:'（已刪除）', '聯絡電話': s?s.phone||'':'', '購買方案': p.packageName, '購買總堂數': p.sessions, '已上堂數': packageUsed(p.id), '剩餘堂數': packageRemaining(p), '合約到期日': p.contractEnd||'' };
@@ -3145,8 +3171,8 @@ function buildReport2Rows(start, end){
   rows.forEach(r=>delete r.time);
   return rows;
 }
-function exportReport2(){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportReport2(){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const start = document.getElementById('range2-start').value; const end = document.getElementById('range2-end').value;
   const rows = buildReport2Rows(start, end);
   const wb = XLSX.utils.book_new();
@@ -3163,8 +3189,8 @@ function exportReport2CSV(){
   toast('已下載報表②CSV');
 }
 // 報表③ 教練月結抽成薪資表
-function exportReport3(){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportReport3(){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const coachId = document.getElementById('payroll-coach').value;
   const ym = document.getElementById('payroll-month').value;
   const coach = findCoach(coachId);
@@ -3191,8 +3217,8 @@ function exportPurchasesCSV(){
   downloadCSV(`購課紀錄_${start}_${end}.csv`, rows);
   toast('已下載購課紀錄 CSV');
 }
-function exportScheduleExcelAll(){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportScheduleExcelAll(){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const start = document.getElementById('csv-start').value; const end = document.getElementById('csv-end').value;
   const rows = state.schedules.filter(sc=>{ const d = localDateStr(sc.datetime); return d>=start && d<=end; }).sort((a,b)=>a.datetime.localeCompare(b.datetime)).map(sc=>{ const s = findStudent(sc.studentId); const co=findCoach(sc.coachId); return { '時間': fmtDateTime(sc.datetime), '學生': s?s.name:'', '教練': co?co.name:'', '狀態': sc.status==='completed'?'已完成':sc.status==='leave'?'請假':sc.status==='cancelled'?'取消':'已排定', '備註': sc.note||'', '課後紀錄': sc.log||'' }; });
   const wb = XLSX.utils.book_new();
@@ -3200,8 +3226,8 @@ function exportScheduleExcelAll(){
   XLSX.writeFile(wb, `課表_${start}_${end}.xlsx`);
   toast('已匯出課表 Excel');
 }
-function exportStudentScheduleExcel(id){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportStudentScheduleExcel(id){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const s = findStudent(id);
   if(!s) return;
   const rows = state.schedules.filter(sc=>sc.studentId===id).sort((a,b)=>a.datetime.localeCompare(b.datetime)).map(sc=>{ const co=findCoach(sc.coachId); return { '時間': fmtDateTime(sc.datetime), '教練': co?co.name:'', '狀態': sc.status==='completed'?'已完成':sc.status==='leave'?'請假':sc.status==='cancelled'?'取消':'已排定', '備註': sc.note||'', '課後紀錄': sc.log||'' }; });
@@ -3210,8 +3236,8 @@ function exportStudentScheduleExcel(id){
   XLSX.writeFile(wb, `${s.name}_課表.xlsx`);
   toast('已匯出課表');
 }
-function exportExcel(){
-  if(typeof XLSX==='undefined'){ toast('Excel 元件載入失敗，請重新整理後再試一次'); return; }
+async function exportExcel(){
+  if(!(await ensureXLSX())){ toast('Excel 元件載入失敗，請檢查網路連線後再試一次'); return; }
   const monthInput = document.getElementById('export-month');
   const ym = monthInput.value || localDateStr(new Date()).slice(0,7);
   const wb = XLSX.utils.book_new();
@@ -3279,6 +3305,7 @@ function openAddStudentModal(){
     if(!branch){ toast('請選擇店別（1店或2店）'); return; }
     const s = { id: genId(), name, branch, gender: document.getElementById('f-gender').value, age: document.getElementById('f-age').value ? Number(document.getElementById('f-age').value) : null, birthday: document.getElementById('f-birthday').value, phone: document.getElementById('f-phone').value.trim(), note: document.getElementById('f-note').value.trim(), customQRCode: document.getElementById('f-qrcode').value.trim() || null, createdAt: new Date().toISOString() };
     state.students.push(s);
+    autoEnablePublicView(s);
     saveStudents();
     pushPublicView(s.id);
     closeModal();
@@ -3356,6 +3383,7 @@ function openEditStudentModal(id){
     s.name = name; s.branch = document.getElementById('f-branch').value; s.gender = document.getElementById('f-gender').value; s.age = document.getElementById('f-age').value ? Number(document.getElementById('f-age').value) : null; s.birthday = document.getElementById('f-birthday').value; s.phone = document.getElementById('f-phone').value.trim(); s.note = document.getElementById('f-note').value.trim(); s.customQRCode = document.getElementById('f-qrcode').value.trim() || null;
     const newNote = document.getElementById('f-coachnote').value.trim();
     if(newNote !== (s.coachNote||'')){ if(newNote){ s.coachNote = newNote; s.coachNoteAt = new Date().toISOString(); } else { delete s.coachNote; delete s.coachNoteAt; } }
+    autoEnablePublicView(s);
     saveStudents();
     pushPublicView(s.id);
     closeModal();
@@ -3799,20 +3827,30 @@ function parseCsvText(text){
   if(cur!=='' || row.length){ row.push(cur); rows.push(row); }
   return rows;
 }
-function ensureXLSX(){
-  if(typeof XLSX!=='undefined') return Promise.resolve(true);
-  const urls = ['https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js','https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js','https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'];
-  return urls.reduce((chain, url)=>chain.then(ok=>{
-    if(ok || typeof XLSX!=='undefined') return true;
+/* ---------- 大型工具用到才載入（學生頁、手機打開比較快）----------
+   Excel 匯出、圖表、掃描這幾個工具很大，學生頁完全用不到，所以不放在網頁開頭，
+   第一次要用時才下載，之後瀏覽器會記住。每個工具有好幾個備用網址，第一個載不到就換下一個。 */
+const libLoading = {};
+function loadLibOnce(globalName, urls){
+  if(typeof window[globalName] !== 'undefined') return Promise.resolve(true);
+  if(libLoading[globalName]) return libLoading[globalName];
+  const p = urls.reduce((chain, url)=>chain.then(ok=>{
+    if(ok || typeof window[globalName] !== 'undefined') return true;
     return new Promise(res=>{
-      const s = document.createElement('script'); s.src = url;
-      const t = setTimeout(()=>res(false), 10000);
-      s.onload = ()=>{ clearTimeout(t); res(typeof XLSX!=='undefined'); };
-      s.onerror = ()=>{ clearTimeout(t); res(false); };
-      document.head.appendChild(s);
+      const el = document.createElement('script'); el.src = url; el.async = true;
+      const t = setTimeout(()=>res(false), 15000);
+      el.onload = ()=>{ clearTimeout(t); res(typeof window[globalName] !== 'undefined'); };
+      el.onerror = ()=>{ clearTimeout(t); res(false); };
+      document.head.appendChild(el);
     });
-  }), Promise.resolve(false));
+  }), Promise.resolve(false)).then(ok=>{ if(!ok) delete libLoading[globalName]; return ok; });
+  libLoading[globalName] = p;
+  return p;
 }
+function ensureXLSX(){ return loadLibOnce('XLSX', ['https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js','https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js','https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js']); }
+function ensureExcelJS(){ return loadLibOnce('ExcelJS', ['https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js','https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js','https://unpkg.com/exceljs@4.4.0/dist/exceljs.min.js']); }
+function ensureChart(){ return loadLibOnce('Chart', ['https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js','https://unpkg.com/chart.js@4.4.4/dist/chart.umd.min.js']); }
+function ensureQrScanner(){ return loadLibOnce('QrScanner', ['https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner.umd.min.js','https://cdn.jsdelivr.net/npm/qr-scanner@1.4.2/qr-scanner.umd.min.js','https://unpkg.com/qr-scanner@1.4.2/qr-scanner.umd.min.js']); }
 async function readLegacyExcel(file){
   toast('正在讀取檔案…');
   try{
@@ -4341,6 +4379,10 @@ function attachViewHandlers(){
 }
 
 /* ---------------- 學生自助查詢連結 ---------------- */
+function autoEnablePublicView(s){
+  // 有填手機、教練沒有手動停用過的學生，自動開啟查詢
+  if(fbReady && fbUser && s && s.publicViewEnabled===undefined && !s.archived && normPhone(s.phone)){ s.publicViewEnabled = true; ensureStudentToken(s); }
+}
 function ensureStudentToken(s){
   if(!s.publicToken){ s.publicToken = genId()+genId()+genId(); }
   return s.publicToken;
@@ -4443,17 +4485,47 @@ async function writePhoneLookup(phone, excludeId){
     return false;
   }
 }
-async function syncStudentPhoneLookup(s, excludeId){
-  if(!fbReady || !fbUser || !s || !(window.crypto && crypto.subtle)) return;
+const lookupPrevPending = {};   // 學生 id -> 存檔前的舊查詢手機（只放記憶體，查詢資料寫完就刪掉）
+function lookupPlan(s, excludeId){
   const active = s.id!==excludeId && !s.archived && s.publicViewEnabled && s.publicToken;
   const cur = active ? normPhone(s.phone) : '';
-  const prev = s.lookupPhone || '';
   const sig = cur ? (cur+'|'+s.publicToken+'|'+(s.name||'')) : '';
-  if(prev===cur && (s.lookupSig||'')===sig) return;   // 沒有變動就不用重寫
+  return { cur, sig };
+}
+/* 存學生資料之前呼叫：有變動的學生先把查詢用欄位改好，跟這次存檔一起存，存完再寫查詢資料 */
+function prepareLookupFieldsBeforeSave(){
+  if(!fbReady || !fbUser || !(window.crypto && crypto.subtle)) return [];
+  const touched = [];
+  state.students.forEach(s=>{
+    const { cur, sig } = lookupPlan(s);
+    const prev = s.lookupPhone || '';
+    if(prev===cur && (s.lookupSig||'')===sig) return;
+    if(!Object.prototype.hasOwnProperty.call(lookupPrevPending, s.id)) lookupPrevPending[s.id] = prev;
+    if(cur){ s.lookupPhone = cur; s.lookupSig = sig; } else { delete s.lookupPhone; delete s.lookupSig; }
+    touched.push(s);
+  });
+  return touched;
+}
+async function syncStudentPhoneLookup(s, excludeId){
+  if(!fbReady || !fbUser || !s || !(window.crypto && crypto.subtle)) return;
+  const pending = Object.prototype.hasOwnProperty.call(lookupPrevPending, s.id);
+  const prev = pending ? lookupPrevPending[s.id] : (s.lookupPhone || '');
+  if(pending) delete lookupPrevPending[s.id];   // 同一筆只讓一個地方處理
+  const { cur, sig } = lookupPlan(s, excludeId);
+  if(!pending && prev===cur && (s.lookupSig||'')===sig) return;   // 沒有變動就不用重寫
   let ok = true;
   if(prev && prev!==cur) ok = (await writePhoneLookup(prev, excludeId)) && ok;   // 換號碼：舊號碼的查詢資料要更新／移除
   if(cur) ok = (await writePhoneLookup(cur, excludeId)) && ok;
-  if(!ok || s.id===excludeId) return;
+  if(s.id===excludeId) return;
+  if(!ok){
+    if(pending){   // 欄位已經跟著存檔寫成「完成」，但查詢資料其實沒寫成功：改回去，下次再補
+      if(prev) s.lookupPhone = prev; else delete s.lookupPhone;
+      delete s.lookupSig;
+      scheduleStudentsSave();
+    }
+    return;
+  }
+  if((s.lookupPhone||'')===cur && (s.lookupSig||'')===sig) return;   // 欄位已經跟存檔一起寫進去了，不用再存一次
   if(cur){ s.lookupPhone = cur; s.lookupSig = sig; } else { delete s.lookupPhone; delete s.lookupSig; }
   scheduleStudentsSave();
 }
